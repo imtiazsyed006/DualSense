@@ -15,33 +15,25 @@ import sys
 # =================== CONFIG ===================
 # Axes (typical DualSense via SDL/pygame; change if needed)
 LEFT_X_AXIS   = 0  # Left stick X  -> roll  (-1..+1)
-LEFT_Y_AXIS   = 1  # Left stick Y  -> pitch (-1..+1, up is -1 so we invert)
+LEFT_Y_AXIS  = 1  # Left stick Y  -> pitch (-1..+1, up is -1 so we invert)
 RIGHT_X_AXIS  = 2  # Right stick X -> sway  (-1..+1)
 RIGHT_Y_AXIS  = 3  # Right stick Y -> surge (-1..+1, forward is -1 so we invert)
 L2_AXIS       = 4  # Left trigger  -> yaw (0..+1 magnitude, sign via L1)
 R2_AXIS       = 5  # Right trigger -> heave (0..+1 magnitude, sign via R1)
 
 # Buttons (indices may differ per OS/driver)
-L1_BUTTON           = 9      # set to your L1 index
+L1_BUTTON           = 9      # L1
 R1_BUTTON           = 10     # R1
-LIGHT_TOGGLE_BUTTON = 4     # <-- set this to the button you want for LIGHT toggle
+LIGHT_TOGGLE_BUTTON = 4      # your mapping (often "Share")
 
-# D-pad as BUTTONS (fallback for platforms where D-pad is not a hat)
-# If your log shows e.g. "[BTN] Btn#13 pressed" for Up, set UP=13.
-DPAD_UP_BUTTON    = 11  # set to None if unknown; adjust after seeing logs
-DPAD_DOWN_BUTTON  = 12  # set to None if unknown; adjust after seeing logs
-# Optionally LEFT/RIGHT if you need them:
+# D-pad as BUTTONS (if your platform exposes them as buttons)
+DPAD_UP_BUTTON    = 11
+DPAD_DOWN_BUTTON  = 12
 DPAD_LEFT_BUTTON  = None
 DPAD_RIGHT_BUTTON = None
 
-# Optional button name map (helps logs). Extend as you discover indices.
-BTN_NAMES = {
-    0: "✖ Cross", 1: "○ Circle", 2: "□ Square", 3: "△ Triangle",
-    4: "Share", 5: "PS", 6: "Options", 7: "L3", 8: "R3",
-    9: "L1", 10: "R1", 11: "LightBtn", 15: "TouchPad",
-    13: "DPadLeft", 12: "DPadDown", 16: "DPadLeft", 14: "DPadRight"
-}
-def btn_name(i): return BTN_NAMES.get(i, f"Btn#{i}")
+# Debug: set True to log which button index changes (helps mapping)
+DEBUG_MAP = False
 
 # Deadzones
 STICK_DEADZONE   = 0.08
@@ -53,12 +45,10 @@ TRIG_REST  = -1.0
 # Joystick/sample rate
 LOOP_HZ = 30
 
-# Light intensity bounds (CCR-style numbers, e.g., 6000..7600)
-LIGHT_MIN = 6000
+# Light intensity bounds
+LIGHT_MIN = 4400
 LIGHT_MAX = 7600
-LIGHT_STEP = 25           # increment per repeat
-REPEAT_FIRST_MS = 220     # initial delay before auto-repeat
-REPEAT_NEXT_MS  = 70      # repeat rate when held
+LIGHT_STEP_PER_FRAME = 1     # ±1 each frame while held
 
 # Network defaults
 DEFAULT_IP   = "192.168.0.25"
@@ -78,49 +68,6 @@ def trigger_to_01(raw, rest=-1.0, dz=0.02):
         return 0.0
     t = (raw - rest) / (1.0 - rest)   # [rest..+1] -> [0..1]
     return clamp(t, 0.0, 1.0)
-
-class ButtonDebouncer:
-    def __init__(self, debounce_ms=100):
-        self.debounce_ms = debounce_ms
-        self._debounced_state = False
-        self._last_raw_state = False
-        self._last_change_ms = 0
-    def update(self, raw_state: bool, now_ms: int):
-        if raw_state != self._last_raw_state:
-            self._last_raw_state = raw_state
-            self._last_change_ms = now_ms
-        else:
-            if (now_ms - self._last_change_ms) >= self.debounce_ms:
-                self._debounced_state = raw_state
-        return self._debounced_state
-
-class HoldRepeater:
-    """Edge+hold auto-repeat for hat/button up/down."""
-    def __init__(self, first_ms=220, next_ms=70):
-        self.first_ms = first_ms
-        self.next_ms  = next_ms
-        self.state    = 0     # -1 down, 0 none, +1 up
-        self.started  = False
-        self.t0_ms    = 0
-        self.last_ms  = 0
-    def feed(self, dir_state: int, now_ms: int):
-        """dir_state in {-1,0,+1}. Returns True when we should step."""
-        step = False
-        if dir_state != self.state:
-            self.state   = dir_state
-            self.started = dir_state != 0
-            self.t0_ms   = now_ms
-            self.last_ms = now_ms
-            if self.started:
-                step = True  # initial step on press
-        else:
-            if self.state != 0 and self.started:
-                elapsed = now_ms - self.t0_ms
-                if elapsed >= self.first_ms:
-                    if (now_ms - self.last_ms) >= self.next_ms:
-                        self.last_ms = now_ms
-                        step = True
-        return step
 
 class NetClient:
     """
@@ -191,10 +138,10 @@ class NetClient:
                         self.log("RX: connection closed by peer", "err")
                         break
                     try:
-                        s = data.decode("utf-8", errors="replace")
-                        self.log(s.rstrip("\r\n"), "rx")
+                        s = data.decode("utf-8", errors="replace").rstrip("\r\n")
+                        self.log(f"RX: {s}", "rx")
                     except Exception:
-                        self.log(data.hex(), "rx")
+                        self.log(f"RX (bin): {data.hex()}", "rx")
                 except socket.timeout:
                     continue
                 except Exception as e:
@@ -220,7 +167,13 @@ class NetClient:
             buf = b"inputF32L:" + payload
             with self._tx_lock:
                 self.tx_sock.sendall(buf)
-            # quiet: no per-frame TX log
+            # ---- TCP OUTGOING LOG ----
+            self.log(
+                (f"TX: roll={roll:+.3f} pitch={pitch:+.3f} yaw={yaw:+.3f} "
+                 f"surge={surge:+.3f} sway={sway:+.3f} heave={heave:+.3f} | "
+                 f"light={light_intensity} ({'EN' if light_enabled else 'DIS'})"),
+                "tx"
+            )
         except Exception as e:
             self.log(f"TX error: {e}", "err")
             self.disconnect()
@@ -274,20 +227,21 @@ class App(tk.Tk):
         self.net = NetClient(self._log_enqueue, self._set_led)
         self.running = True
 
-        # toggles (determine sign for trigger channels)
-        self.heave_invert = False
+        # Sign toggles (L1=Yaw sign, R1=Heave sign). RAW edge (no debounce).
         self.yaw_invert   = False
-        self.r1_deb = ButtonDebouncer(100)
-        self.l1_deb = ButtonDebouncer(100)
+        self.heave_invert = False
+        self._prev_l1_raw = False
+        self._prev_r1_raw = False
 
         # Light control state
         self.light_enabled   = False
         self.light_intensity = LIGHT_MIN
-        self.light_btn_deb   = ButtonDebouncer(120)
 
-        self._prev_light_raw = False  # track raw edge for light toggle
-        # D-pad repeat (via HAT 0)
-        self.rep = HoldRepeater(REPEAT_FIRST_MS, REPEAT_NEXT_MS)
+        # Light toggle uses RAW edge
+        self._prev_light_raw = False
+
+        # For optional mapping debug
+        self._prev_btn_raw = []
 
         # Track last-sent values for change-driven TX
         self._last_sent = {
@@ -295,7 +249,6 @@ class App(tk.Tk):
             "surge": None, "sway": None, "heave": None,
             "light_intensity": None, "light_enabled": None
         }
-        self._eps_axis = 0.01   # send only if |delta| > 0.01
 
         # init pygame joystick in background
         self._joy_thread = threading.Thread(target=self._joystick_loop, daemon=True)
@@ -365,9 +318,9 @@ class App(tk.Tk):
 
     # ------------- Joystick loop -------------
     def _joystick_loop(self):
-        pygame.joystick.init()
-        pygame.display.init()
-
+        # pygame.joystick.init()
+        # pygame.display.init()
+        pygame.init()
         if pygame.joystick.get_count() == 0:
             self._log_enqueue("No joystick detected. Plug in your controller and restart.", "err")
             return
@@ -375,45 +328,40 @@ class App(tk.Tk):
         js = pygame.joystick.Joystick(0); js.init()
         self._log_enqueue(f"Controller: {js.get_name()} (axes={js.get_numaxes()}, buttons={js.get_numbuttons()}, hats={js.get_numhats()})", "sys")
 
-        # Track prior button/hat states for edge detection
+        # for debug mapping
         nbtn = js.get_numbuttons()
-        prev_btns = [False] * nbtn
-        prev_hat  = (0, 0)
+        self._prev_btn_raw = [False] * nbtn
 
         dt = 1.0 / LOOP_HZ
         try:
             while self.running:
                 pygame.event.pump()
-                now_ms = pygame.time.get_ticks()
 
-                # -------- Buttons (edge-detected, debounced) --------
-                r1_raw    = bool(js.get_button(R1_BUTTON)) if R1_BUTTON < nbtn else False
+                # -------- RAW buttons --------
+                nbtn = js.get_numbuttons()
                 l1_raw    = bool(js.get_button(L1_BUTTON)) if L1_BUTTON < nbtn else False
+                r1_raw    = bool(js.get_button(R1_BUTTON)) if R1_BUTTON < nbtn else False
                 light_raw = bool(js.get_button(LIGHT_TOGGLE_BUTTON)) if LIGHT_TOGGLE_BUTTON < nbtn else False
 
-                r1 = self.r1_deb.update(r1_raw, now_ms)
-                l1 = self.l1_deb.update(l1_raw, now_ms)
-                light_btn = self.light_btn_deb.update(light_raw, now_ms)
+                # Optional: show which button indices change (helps mapping)
+                if DEBUG_MAP:
+                    for i in range(nbtn):
+                        cur = bool(js.get_button(i))
+                        if cur != self._prev_btn_raw[i]:
+                            self._log_enqueue(f"[MAP] Btn#{i} -> {'DOWN' if cur else 'UP'}", "sys")
+                        self._prev_btn_raw[i] = cur
 
-                # Which button was pressed (generic print)
-                for i in range(nbtn):
-                    pressed = bool(js.get_button(i))
-                    if pressed and not prev_btns[i]:
-                        self._log_enqueue(f"[BTN] {btn_name(i)} pressed", "sys")
-                    prev_btns[i] = pressed
-
-                # R1/L1 toggle modes
-                if not hasattr(self, "_prev_r1"):
-                    self._prev_r1 = r1; self._prev_l1 = l1; self._prev_light = light_btn
-                if r1 and not self._prev_r1:
-                    self.heave_invert = not self.heave_invert
-                    self._log_enqueue(f"[BTN] R1 pressed → Heave mode = {'NEG(−)' if self.heave_invert else 'POS(+)' }", "sys")
-                if l1 and not self._prev_l1:
+                # --- L1/R1 sign toggles: RAW rising edge (no debounce) ---
+                if l1_raw and not self._prev_l1_raw:
                     self.yaw_invert = not self.yaw_invert
-                    self._log_enqueue(f"[BTN] L1 pressed → Yaw mode = {'NEG(−)' if self.yaw_invert else 'POS(+)' }", "sys")
+                    self._log_enqueue(f"[BTN] L1 → Yaw mode = {'NEG(−)' if self.yaw_invert else 'POS(+)' }", "sys")
+                if r1_raw and not self._prev_r1_raw:
+                    self.heave_invert = not self.heave_invert
+                    self._log_enqueue(f"[BTN] R1 → Heave mode = {'NEG(−)' if self.heave_invert else 'POS(+)' }", "sys")
+                self._prev_l1_raw = l1_raw
+                self._prev_r1_raw = r1_raw
 
-                # Light toggle behavior (print ON/OFF + intensity)
-# --- LIGHT TOGGLE: use RAW rising edge so quick taps work ---
+                # --- Light toggle: RAW rising edge ---
                 if light_raw and not self._prev_light_raw:
                     if self.light_intensity > LIGHT_MIN and self.light_enabled:
                         self.light_intensity = LIGHT_MIN
@@ -425,51 +373,24 @@ class App(tk.Tk):
                     else:
                         self.light_enabled = False
                         self._log_enqueue(f"[LIGHT] OFF, intensity={self.light_intensity}", "sys")
-
-                # latch previous states
                 self._prev_light_raw = light_raw
-                self._prev_r1 = r1
-                self._prev_l1 = l1
 
-                # -------- D-pad via HAT (primary) --------
-                hat_x, hat_y = (0, 0)
-                use_hat = js.get_numhats() > 0
-                if use_hat:
-                    hat_x, hat_y = js.get_hat(0)  # (x,y) in {-1,0,1}
-                    if hat_y == +1 and prev_hat[1] != +1:
-                        self._log_enqueue("[HAT] Up pressed", "sys")
-                    if hat_y == -1 and prev_hat[1] != -1:
-                        self._log_enqueue("[HAT] Down pressed", "sys")
-                    prev_hat = (hat_x, hat_y)
-
-                # -------- D-pad via BUTTONS (fallback) --------
-                dpad_up_pressed = (DPAD_UP_BUTTON   is not None and DPAD_UP_BUTTON   < nbtn and bool(js.get_button(DPAD_UP_BUTTON)))
-                dpad_dn_pressed = (DPAD_DOWN_BUTTON is not None and DPAD_DOWN_BUTTON < nbtn and bool(js.get_button(DPAD_DOWN_BUTTON)))
-
-                # Convert to light_dir: up=+1, down=-1
+                # -------- D-pad direction: prefer HAT, else button raw --------
                 light_dir = 0
-                if use_hat and hat_y != 0:
+                hat_y = 0
+                if js.get_numhats() > 0:
+                    _, hat_y = js.get_hat(0)  # (x,y) in {-1,0,1}
+                if hat_y != 0:
                     light_dir = 1 if hat_y > 0 else -1
                 else:
-                    # fallback to buttons
-                    if dpad_up_pressed and not dpad_dn_pressed:
-                        light_dir = +1
-                        self._log_enqueue("[DPAD] Up pressed", "sys")
-                    elif dpad_dn_pressed and not dpad_up_pressed:
-                        light_dir = -1
-                        self._log_enqueue("[DPAD] Down pressed", "sys")
+                    up_raw   = (DPAD_UP_BUTTON   is not None and DPAD_UP_BUTTON   < nbtn and bool(js.get_button(DPAD_UP_BUTTON)))
+                    dn_raw   = (DPAD_DOWN_BUTTON is not None and DPAD_DOWN_BUTTON < nbtn and bool(js.get_button(DPAD_DOWN_BUTTON)))
+                    if up_raw and not dn_raw:
+                        light_dir = +10
+                    elif dn_raw and not up_raw:
+                        light_dir = -10
 
-                # Change intensity with hold-repeater (only when light is enabled)
-                if self.rep.feed(light_dir, now_ms) and self.light_enabled:
-                    old = self.light_intensity
-                    if light_dir > 0:
-                        self.light_intensity = clamp(self.light_intensity + LIGHT_STEP, LIGHT_MIN, LIGHT_MAX)
-                    elif light_dir < 0:
-                        self.light_intensity = clamp(self.light_intensity - LIGHT_STEP, LIGHT_MIN, LIGHT_MAX)
-                    if self.light_intensity != old:
-                        self._log_enqueue(f"[LIGHT] intensity→{self.light_intensity}", "sys")
-
-                # -------- Axes / Triggers (with deadzones + sign toggles) --------
+                # -------- Axes / Triggers --------
                 lx = clamp(js.get_axis(LEFT_X_AXIS),  -1.0, 1.0)
                 ly = clamp(js.get_axis(LEFT_Y_AXIS),  -1.0, 1.0)
                 rx = clamp(js.get_axis(RIGHT_X_AXIS), -1.0, 1.0)
@@ -487,14 +408,22 @@ class App(tk.Tk):
                 heave = (-heave_mag) if self.heave_invert else (+heave_mag)
                 yaw   = (-yaw_mag)   if self.yaw_invert   else (+yaw_mag)
 
+                # -------- Intensity: ±1 each frame while held (even if disabled) --------
+                if light_dir != 0:
+                    old = self.light_intensity
+                    self.light_intensity = clamp(self.light_intensity + (LIGHT_STEP_PER_FRAME * light_dir),
+                                                 LIGHT_MIN, LIGHT_MAX)
+                    if self.light_intensity != old:
+                        self._log_enqueue(f"[LIGHT] intensity→{self.light_intensity}", "sys")
+
                 # -------- Send only when something changed --------
                 def changed(name, new, eps=None):
-                    old = self._last_sent[name]
-                    if old is None:
+                    oldv = self._last_sent[name]
+                    if oldv is None:
                         return True
                     if eps is None:
-                        return old != new
-                    return abs(new - old) > eps
+                        return oldv != new
+                    return abs(new - oldv) > eps
 
                 need_send = (
                     changed("roll",  roll,  0.01) or
@@ -512,7 +441,6 @@ class App(tk.Tk):
                         roll, pitch, yaw, surge, sway, heave,
                         self.light_intensity, self.light_enabled
                     )
-                    # latch last-sent values
                     self._last_sent.update(dict(
                         roll=roll, pitch=pitch, yaw=yaw,
                         surge=surge, sway=sway, heave=heave,
