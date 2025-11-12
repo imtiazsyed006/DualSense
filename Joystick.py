@@ -1,3 +1,12 @@
+#ESC1 RR_Top
+#ESC2 FR_Top
+#ESC3 FR_Bot
+#ESC4 RL_Bot
+#ESC5  RR_Bot
+#ESC6 RL_Top
+#ESC7 FL_Top
+#ESC8 FL_Bot
+
 import os
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -46,7 +55,7 @@ TRIG_REST  = -1.0
 LOOP_HZ = 30
 
 # Light intensity bounds
-LIGHT_MIN = 4400
+LIGHT_MIN = 4000
 LIGHT_MAX = 7600
 LIGHT_STEP_PER_FRAME = 1     # ±1 each frame while held
 
@@ -86,26 +95,28 @@ class NetClient:
 
     def connect(self, ip: str):
         self.disconnect()
-        try:
-            self.tx_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.tx_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            self.tx_sock.connect((ip, SEND_PORT))
+        if pygame.joystick.get_count() != 0:
+            
+            try:
+                self.tx_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.tx_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self.tx_sock.connect((ip, SEND_PORT))
 
-            self.rx_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.rx_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            self.rx_sock.connect((ip, RECV_PORT))
+                self.rx_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.rx_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self.rx_sock.connect((ip, RECV_PORT))
 
-            self._stop.clear()
-            self._rx_thread = threading.Thread(target=self._rx_loop, daemon=True)
-            self._rx_thread.start()
+                self._stop.clear()
+                self._rx_thread = threading.Thread(target=self._rx_loop, daemon=True)
+                self._rx_thread.start()
 
-            self.set_led(True)
-            self.log(f"Connected to {ip}: TX->{SEND_PORT}, RX<-{RECV_PORT}", "sys")
-            return True
-        except Exception as e:
-            self.log(f"Connect failed: {e}", "err")
-            self.disconnect()
-            return False
+                self.set_led(True)
+                self.log(f"Connected to {ip}: TX->{SEND_PORT}, RX<-{RECV_PORT}", "sys")
+                return True
+            except Exception as e:
+                self.log(f"Connect failed: {e}", "err")
+                self.disconnect()
+                return False
 
     def disconnect(self):
         self._stop.set()
@@ -309,7 +320,10 @@ class App(tk.Tk):
         ip = self.ip_var.get().strip()
         if not ip:
             self._log_enqueue("No IP entered", "err"); return
-        self._log_enqueue(f"Connecting to {ip}...", "sys")
+        if (pygame.joystick.get_count() != 0):
+            self._log_enqueue(f"Connecting to {ip}...", "sys")
+        else:
+            self._log_enqueue(f"Please connect joystick first.", "sys")
         threading.Thread(target=lambda: self.net.connect(ip), daemon=True).start()
 
     def on_disconnect(self):
