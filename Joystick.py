@@ -2,7 +2,7 @@
 #ESC2 FR_Top
 #ESC3 FR_Bot
 #ESC4 RL_Bot
-#ESC5  RR_Bot
+#ESC5 RR_Bot
 #ESC6 RL_Top
 #ESC7 FL_Top
 #ESC8 FL_Bot
@@ -23,16 +23,18 @@ import sys
 
 # =================== CONFIG ===================
 # Axes (typical DualSense via SDL/pygame; change if needed)
-LEFT_X_AXIS   = 0  # Left stick X  -> roll  (-1..+1)
-LEFT_Y_AXIS  = 1  # Left stick Y  -> pitch (-1..+1, up is -1 so we invert)
-RIGHT_X_AXIS  = 2  # Right stick X -> sway  (-1..+1)
-RIGHT_Y_AXIS  = 3  # Right stick Y -> surge (-1..+1, forward is -1 so we invert)
-L2_AXIS       = 4  # Left trigger  -> yaw (0..+1 magnitude, sign via L1)
-R2_AXIS       = 5  # Right trigger -> heave (0..+1 magnitude, sign via R1)
+LEFT_X_AXIS   = 0  # Left stick X  -> sway (-1..+1)
+LEFT_Y_AXIS   = 1  # Left stick Y  -> heave (-1..+1, up is -1 so we invert)
+
+RIGHT_X_AXIS  = 2  # Right stick X -> yaw  (-1..+1)
+RIGHT_Y_AXIS  = 3  # Right stick Y -> pitch (-1..+1, forward is -1 so we invert)
+
+L2_AXIS       = 4  # Left trigger  -> roll (0..+1 magnitude, sign via L1 toggle)
+R2_AXIS       = 5  # Right trigger -> surge (0..+1 magnitude, sign via R1 toggle)
 
 # Buttons (indices may differ per OS/driver)
-L1_BUTTON           = 9      # L1
-R1_BUTTON           = 10     # R1
+L1_BUTTON           = 9      # L1: flip roll direction (toggle)
+R1_BUTTON           = 10     # R1: flip surge direction (toggle)
 LIGHT_TOGGLE_BUTTON = 4      # your mapping (often "Share")
 
 # D-pad as BUTTONS (if your platform exposes them as buttons)
@@ -68,8 +70,11 @@ RECV_PORT    = 2000  # replies  <- STM32
 LOG_MAX_LINES = 2000
 # =============================================
 
-def clamp(v, lo, hi): return lo if v < lo else hi if v > hi else v
-def deadzone(v, dz):   return 0.0 if abs(v) < dz else v
+def clamp(v, lo, hi):
+    return lo if v < lo else hi if v > hi else v
+
+def deadzone(v, dz):
+    return 0.0 if abs(v) < dz else v
 
 def trigger_to_01(raw, rest=-1.0, dz=0.02):
     """Convert trigger raw [-1..+1] with rest≈-1 to 0..1."""
@@ -96,7 +101,6 @@ class NetClient:
     def connect(self, ip: str):
         self.disconnect()
         if pygame.joystick.get_count() != 0:
-            
             try:
                 self.tx_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.tx_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -122,18 +126,24 @@ class NetClient:
         self._stop.set()
         try:
             if self.rx_sock:
-                try: self.rx_sock.shutdown(socket.SHUT_RDWR)
-                except: pass
+                try:
+                    self.rx_sock.shutdown(socket.SHUT_RDWR)
+                except:
+                    pass
                 self.rx_sock.close()
         finally:
             self.rx_sock = None
+
         try:
             if self.tx_sock:
-                try: self.tx_sock.shutdown(socket.SHUT_RDWR)
-                except: pass
+                try:
+                    self.tx_sock.shutdown(socket.SHUT_RDWR)
+                except:
+                    pass
                 self.tx_sock.close()
         finally:
             self.tx_sock = None
+
         self.set_led(False)
 
     def is_connected(self):
@@ -170,15 +180,17 @@ class NetClient:
         if not self.tx_sock:
             return
         try:
-            payload = struct.pack("<6fI?",
-                                  float(roll), float(pitch), float(yaw),
-                                  float(surge), float(sway), float(heave),
-                                  int(light_intensity),
-                                  bool(light_enabled))
+            payload = struct.pack(
+                "<6fI?",
+                float(roll), float(pitch), float(yaw),
+                float(surge), float(sway), float(heave),
+                int(light_intensity),
+                bool(light_enabled)
+            )
             buf = b"inputF32L:" + payload
             with self._tx_lock:
                 self.tx_sock.sendall(buf)
-            # ---- TCP OUTGOING LOG ----
+
             self.log(
                 (f"TX: roll={roll:+.3f} pitch={pitch:+.3f} yaw={yaw:+.3f} "
                  f"surge={surge:+.3f} sway={sway:+.3f} heave={heave:+.3f} | "
@@ -197,39 +209,59 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # ====== UI ======
-        top = ttk.Frame(self); top.pack(fill="x", padx=8, pady=8)
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=8, pady=8)
+
         ttk.Label(top, text="STM32 IP:").pack(side="left")
         self.ip_var = tk.StringVar(value=DEFAULT_IP)
-        ttk.Entry(top, textvariable=self.ip_var, width=18).pack(side="left", padx=(4,10))
-        self.btn_connect = ttk.Button(top, text="Connect", command=self.on_connect); self.btn_connect.pack(side="left", padx=4)
-        self.btn_disconnect = ttk.Button(top, text="Disconnect", command=self.on_disconnect, state="disabled"); self.btn_disconnect.pack(side="left", padx=4)
-        self.led_canvas = tk.Canvas(top, width=18, height=18, highlightthickness=0); self.led_canvas.pack(side="left", padx=10)
-        self.led_id = self.led_canvas.create_oval(2,2,16,16, fill="#aa2222", outline="black")
+        ttk.Entry(top, textvariable=self.ip_var, width=18).pack(side="left", padx=(4, 10))
+
+        self.btn_connect = ttk.Button(top, text="Connect", command=self.on_connect)
+        self.btn_connect.pack(side="left", padx=4)
+
+        self.btn_disconnect = ttk.Button(top, text="Disconnect", command=self.on_disconnect, state="disabled")
+        self.btn_disconnect.pack(side="left", padx=4)
+
+        self.led_canvas = tk.Canvas(top, width=18, height=18, highlightthickness=0)
+        self.led_canvas.pack(side="left", padx=10)
+        self.led_id = self.led_canvas.create_oval(2, 2, 16, 16, fill="#aa2222", outline="black")
+
         ttk.Label(top, text=f"Loop: {LOOP_HZ} Hz").pack(side="right")
 
-        middle = ttk.Frame(self); middle.pack(fill="x", padx=8, pady=(0,8))
+        middle = ttk.Frame(self)
+        middle.pack(fill="x", padx=8, pady=(0, 8))
 
         # ---- Light widget ----
         light_frame = ttk.LabelFrame(middle, text="Light")
         light_frame.pack(side="left", padx=8, pady=4, ipadx=8, ipady=8)
+
         self.light_canvas = tk.Canvas(light_frame, width=140, height=140, bg="white", highlightthickness=0)
         self.light_canvas.grid(row=0, column=0, rowspan=3, padx=8, pady=8)
+
         self.light_outer = self.light_canvas.create_oval(10, 10, 130, 130, fill="#303030", outline="#202020", width=2)
         self.light_inner = self.light_canvas.create_oval(30, 30, 110, 110, fill="#202020", outline="")
-        self.light_lbl    = ttk.Label(light_frame, text="Intensity: 6000")
-        self.light_state  = ttk.Label(light_frame, text="State: Disabled")
-        self.light_hint   = ttk.Label(light_frame, text="Toggle: LIGHT btn\nAdjust: D-pad Up/Down", foreground="gray")
-        self.light_lbl.grid(row=0, column=1, sticky="w", padx=(6,4))
-        self.light_state.grid(row=1, column=1, sticky="w", padx=(6,4))
-        self.light_hint.grid(row=2, column=1, sticky="w", padx=(6,4))
+
+        self.light_lbl = ttk.Label(light_frame, text="Intensity: 6000")
+        self.light_state = ttk.Label(light_frame, text="State: Disabled")
+        self.light_hint = ttk.Label(light_frame, text="Toggle: LIGHT btn\nAdjust: D-pad Up/Down", foreground="gray")
+
+        self.light_lbl.grid(row=0, column=1, sticky="w", padx=(6, 4))
+        self.light_state.grid(row=1, column=1, sticky="w", padx=(6, 4))
+        self.light_hint.grid(row=2, column=1, sticky="w", padx=(6, 4))
 
         # Log
-        log_frame = ttk.Frame(self); log_frame.pack(fill="both", expand=True, padx=8, pady=(0,8))
-        self.log_text = tk.Text(log_frame, wrap="none", height=18); self.log_text.pack(side="left", fill="both", expand=True)
-        scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview); scroll.pack(side="right", fill="y")
+        log_frame = ttk.Frame(self)
+        log_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        self.log_text = tk.Text(log_frame, wrap="none", height=18)
+        self.log_text.pack(side="left", fill="both", expand=True)
+
+        scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        scroll.pack(side="right", fill="y")
         self.log_text.config(yscrollcommand=scroll.set)
-        self.log_text.tag_config("tx",  foreground="blue")
-        self.log_text.tag_config("rx",  foreground="green")
+
+        self.log_text.tag_config("tx", foreground="blue")
+        self.log_text.tag_config("rx", foreground="green")
         self.log_text.tag_config("sys", foreground="gray")
         self.log_text.tag_config("err", foreground="red")
 
@@ -238,17 +270,15 @@ class App(tk.Tk):
         self.net = NetClient(self._log_enqueue, self._set_led)
         self.running = True
 
-        # Sign toggles (L1=Yaw sign, R1=Heave sign). RAW edge (no debounce).
-        self.yaw_invert   = False
-        self.heave_invert = False
-        self._prev_l1_raw = False
+        # Direction toggles via R1/L1
+        self.surge_invert = False  # toggled by R1
+        self.roll_invert  = False  # toggled by L1
         self._prev_r1_raw = False
+        self._prev_l1_raw = False
 
         # Light control state
-        self.light_enabled   = False
+        self.light_enabled = False
         self.light_intensity = LIGHT_MIN
-
-        # Light toggle uses RAW edge
         self._prev_light_raw = False
 
         # For optional mapping debug
@@ -272,13 +302,16 @@ class App(tk.Tk):
     # ------------- GUI helpers -------------
     def _set_led(self, on: bool):
         color = "#22aa22" if on else "#aa2222"
+
         def do():
             self.led_canvas.itemconfig(self.led_id, fill=color)
             self.btn_connect.config(state=("disabled" if on else "normal"))
             self.btn_disconnect.config(state=("normal" if on else "disabled"))
+
         self.after(0, do)
 
-    def _log_enqueue(self, text, tag): self.msg_q.put((text, tag))
+    def _log_enqueue(self, text, tag):
+        self.msg_q.put((text, tag))
 
     def _drain_log_queue(self):
         try:
@@ -293,37 +326,46 @@ class App(tk.Tk):
     def _log_text(self, text, tag):
         self.log_text.insert("end", text + "\n", tag)
         self.log_text.see("end")
-        lines = int(self.log_text.index('end-1c').split('.')[0])
+        lines = int(self.log_text.index("end-1c").split(".")[0])
         if lines > LOG_MAX_LINES:
             cut = max(1, LOG_MAX_LINES // 10)
             self.log_text.delete("1.0", f"{cut}.0")
 
     def _animate_light(self):
-        # Color depends on enabled + intensity
         en = self.light_enabled
-        I  = self.light_intensity
+        I = self.light_intensity
+
         bright = 0.15 if not en else (0.15 + 0.85 * ((I - LIGHT_MIN) / (LIGHT_MAX - LIGHT_MIN)))
         bright = clamp(bright, 0.0, 1.0)
-        gamma  = 2.2
-        g = pow(bright, 1/gamma)
-        r = int(40 + 215 * g); gcol = int(35 + 200 * g); b = int(10 + 30 * g)
+
+        gamma = 2.2
+        gg = pow(bright, 1 / gamma)
+        r = int(40 + 215 * gg)
+        gcol = int(35 + 200 * gg)
+        b = int(10 + 30 * gg)
+
         fill_inner = f"#{r:02x}{gcol:02x}{b:02x}"
-        fill_outer = f"#{max(0,r-40):02x}{max(0,gcol-40):02x}{max(0,b-40):02x}"
+        fill_outer = f"#{max(0, r-40):02x}{max(0, gcol-40):02x}{max(0, b-40):02x}"
+
         self.light_canvas.itemconfig(self.light_inner, fill=fill_inner)
         self.light_canvas.itemconfig(self.light_outer, fill=fill_outer)
         self.light_lbl.config(text=f"Intensity: {self.light_intensity}")
         self.light_state.config(text=f"State: {'Enabled' if self.light_enabled else 'Disabled'}")
+
         self.after(80, self._animate_light)
 
     # ------------- Connect / Disconnect -------------
     def on_connect(self):
         ip = self.ip_var.get().strip()
         if not ip:
-            self._log_enqueue("No IP entered", "err"); return
-        if (pygame.joystick.get_count() != 0):
+            self._log_enqueue("No IP entered", "err")
+            return
+
+        if pygame.joystick.get_count() != 0:
             self._log_enqueue(f"Connecting to {ip}...", "sys")
         else:
-            self._log_enqueue(f"Please connect joystick first.", "sys")
+            self._log_enqueue("Please connect joystick first.", "sys")
+
         threading.Thread(target=lambda: self.net.connect(ip), daemon=True).start()
 
     def on_disconnect(self):
@@ -332,29 +374,33 @@ class App(tk.Tk):
 
     # ------------- Joystick loop -------------
     def _joystick_loop(self):
-        # pygame.joystick.init()
-        # pygame.display.init()
         pygame.init()
+
         if pygame.joystick.get_count() == 0:
             self._log_enqueue("No joystick detected. Plug in your controller and restart.", "err")
             return
 
-        js = pygame.joystick.Joystick(0); js.init()
-        self._log_enqueue(f"Controller: {js.get_name()} (axes={js.get_numaxes()}, buttons={js.get_numbuttons()}, hats={js.get_numhats()})", "sys")
+        js = pygame.joystick.Joystick(0)
+        js.init()
 
-        # for debug mapping
+        self._log_enqueue(
+            f"Controller: {js.get_name()} (axes={js.get_numaxes()}, buttons={js.get_numbuttons()}, hats={js.get_numhats()})",
+            "sys"
+        )
+
         nbtn = js.get_numbuttons()
         self._prev_btn_raw = [False] * nbtn
 
         dt = 1.0 / LOOP_HZ
+
         try:
             while self.running:
                 pygame.event.pump()
 
                 # -------- RAW buttons --------
                 nbtn = js.get_numbuttons()
-                l1_raw    = bool(js.get_button(L1_BUTTON)) if L1_BUTTON < nbtn else False
-                r1_raw    = bool(js.get_button(R1_BUTTON)) if R1_BUTTON < nbtn else False
+                l1_raw = bool(js.get_button(L1_BUTTON)) if L1_BUTTON < nbtn else False
+                r1_raw = bool(js.get_button(R1_BUTTON)) if R1_BUTTON < nbtn else False
                 light_raw = bool(js.get_button(LIGHT_TOGGLE_BUTTON)) if LIGHT_TOGGLE_BUTTON < nbtn else False
 
                 # Optional: show which button indices change (helps mapping)
@@ -365,14 +411,16 @@ class App(tk.Tk):
                             self._log_enqueue(f"[MAP] Btn#{i} -> {'DOWN' if cur else 'UP'}", "sys")
                         self._prev_btn_raw[i] = cur
 
-                # --- L1/R1 sign toggles: RAW rising edge (no debounce) ---
+                # --- L1 toggles roll direction (rising edge) ---
                 if l1_raw and not self._prev_l1_raw:
-                    self.yaw_invert = not self.yaw_invert
-                    self._log_enqueue(f"[BTN] L1 → Yaw mode = {'NEG(−)' if self.yaw_invert else 'POS(+)' }", "sys")
-                if r1_raw and not self._prev_r1_raw:
-                    self.heave_invert = not self.heave_invert
-                    self._log_enqueue(f"[BTN] R1 → Heave mode = {'NEG(−)' if self.heave_invert else 'POS(+)' }", "sys")
+                    self.roll_invert = not self.roll_invert
+                    self._log_enqueue(f"[BTN] L1 → Roll dir = {'NEG(−)' if self.roll_invert else 'POS(+)' }", "sys")
                 self._prev_l1_raw = l1_raw
+
+                # --- R1 toggles surge direction (rising edge) ---
+                if r1_raw and not self._prev_r1_raw:
+                    self.surge_invert = not self.surge_invert
+                    self._log_enqueue(f"[BTN] R1 → Surge dir = {'NEG(−)' if self.surge_invert else 'POS(+)' }", "sys")
                 self._prev_r1_raw = r1_raw
 
                 # --- Light toggle: RAW rising edge ---
@@ -394,11 +442,12 @@ class App(tk.Tk):
                 hat_y = 0
                 if js.get_numhats() > 0:
                     _, hat_y = js.get_hat(0)  # (x,y) in {-1,0,1}
+
                 if hat_y != 0:
                     light_dir = 1 if hat_y > 0 else -1
                 else:
-                    up_raw   = (DPAD_UP_BUTTON   is not None and DPAD_UP_BUTTON   < nbtn and bool(js.get_button(DPAD_UP_BUTTON)))
-                    dn_raw   = (DPAD_DOWN_BUTTON is not None and DPAD_DOWN_BUTTON < nbtn and bool(js.get_button(DPAD_DOWN_BUTTON)))
+                    up_raw = (DPAD_UP_BUTTON is not None and DPAD_UP_BUTTON < nbtn and bool(js.get_button(DPAD_UP_BUTTON)))
+                    dn_raw = (DPAD_DOWN_BUTTON is not None and DPAD_DOWN_BUTTON < nbtn and bool(js.get_button(DPAD_DOWN_BUTTON)))
                     if up_raw and not dn_raw:
                         light_dir = +10
                     elif dn_raw and not up_raw:
@@ -412,21 +461,33 @@ class App(tk.Tk):
                 l2 = clamp(js.get_axis(L2_AXIS),      -1.0, 1.0)
                 r2 = clamp(js.get_axis(R2_AXIS),      -1.0, 1.0)
 
-                roll  = deadzone(lx, STICK_DEADZONE)         # -1..+1
-                pitch = deadzone(-ly, STICK_DEADZONE)        # invert Y → + up
-                sway  = deadzone(rx, STICK_DEADZONE)
-                surge = deadzone(-ry, STICK_DEADZONE)
+                # Right stick:
+                #   forward/back -> pitch (invert Y so forward gives +)
+                #   left/right   -> yaw
+                pitch = deadzone(-ry, STICK_DEADZONE)
+                yaw   = deadzone(rx,  STICK_DEADZONE)
 
-                heave_mag = trigger_to_01(r2, rest=TRIG_REST, dz=TRIGGER_DEADZONE)
-                yaw_mag   = trigger_to_01(l2, rest=TRIG_REST, dz=TRIGGER_DEADZONE)
-                heave = (-heave_mag) if self.heave_invert else (+heave_mag)
-                yaw   = (-yaw_mag)   if self.yaw_invert   else (+yaw_mag)
+                # Left stick:
+                #   forward/back -> heave (invert Y so forward gives +)
+                #   left/right   -> sway
+                heave = deadzone(-ly, STICK_DEADZONE)
+                sway  = deadzone(lx,  STICK_DEADZONE)
+
+                # R2 trigger -> surge magnitude, direction toggled by R1
+                surge_mag = trigger_to_01(r2, rest=TRIG_REST, dz=TRIGGER_DEADZONE)
+                surge = (-surge_mag) if self.surge_invert else (+surge_mag)
+
+                # L2 trigger -> roll magnitude, direction toggled by L1
+                roll_mag = trigger_to_01(l2, rest=TRIG_REST, dz=TRIGGER_DEADZONE)
+                roll = (-roll_mag) if self.roll_invert else (+roll_mag)
 
                 # -------- Intensity: ±1 each frame while held (even if disabled) --------
                 if light_dir != 0:
                     old = self.light_intensity
-                    self.light_intensity = clamp(self.light_intensity + (LIGHT_STEP_PER_FRAME * light_dir),
-                                                 LIGHT_MIN, LIGHT_MAX)
+                    self.light_intensity = clamp(
+                        self.light_intensity + (LIGHT_STEP_PER_FRAME * light_dir),
+                        LIGHT_MIN, LIGHT_MAX
+                    )
                     if self.light_intensity != old:
                         self._log_enqueue(f"[LIGHT] intensity→{self.light_intensity}", "sys")
 
@@ -463,18 +524,23 @@ class App(tk.Tk):
                     ))
 
                 time.sleep(dt)
+
         except Exception as e:
             self._log_enqueue(f"Joystick loop error: {e}", "err")
         finally:
-            try: js.quit()
-            except: pass
+            try:
+                js.quit()
+            except:
+                pass
             pygame.quit()
 
     def on_close(self):
         self.running = False
         self.on_disconnect()
-        try: time.sleep(0.2)
-        except: pass
+        try:
+            time.sleep(0.2)
+        except:
+            pass
         self.destroy()
 
 if __name__ == "__main__":
