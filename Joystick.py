@@ -6,7 +6,7 @@
 #ESC6 RL_Top
 #ESC7 FL_Top
 #ESC8 FL_Bot
-
+# packages that need to be installed are ffmpeg openCV etc. For ffmpeg use chocolatey
 import os
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
